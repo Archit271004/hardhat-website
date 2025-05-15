@@ -463,12 +463,52 @@ def SearchSuggestions(request):
 
 #Search-Results page
 def SearchResults(request):
-    query = request.POST.get('q', '')  # Get search query from request
+    User = get_user_model()
+    query = request.POST.get('q', '').strip()  # Get search query from request
+    
+    if not query:
+        return render(request, 'pages/search-results.html', {
+            'searched': '',
+            'webpages': [],
+            'projects': [],
+            'courses': [],
+            'skills': [],
+            'articles': [],
+            'users': [],
+            'students': [],
+            'contacts': []
+    })
+
+    # Projects logic
+    if query.lower() == "projects":
+        project_results = Project.objects.all()
+    else:
+        project_results = Project.objects.filter(title__icontains=query)
+
+    # Courses logic
+    if query.lower() == "courses":
+        course_results = Course.objects.all()
+    else:
+        course_results = Course.objects.filter(title__icontains=query) | Course.objects.filter(code__icontains=query)
+
+    # Users logic
+    if query.lower() == "user":
+        users = User.objects.filter(id=request.user.id)
+    else:
+        users = User.objects.filter(
+            first_name__icontains=query
+        ) | User.objects.filter(
+            last_name__icontains=query
+        ) | User.objects.filter(
+            email__icontains=query
+        )
+
     results = {
         'searched': query,
         'webpages': Webpage.objects.filter(title__icontains=query),
-        'projects': Project.objects.filter(title__icontains=query),
-        'courses': Course.objects.filter(title__icontains=query),
+        'projects': project_results,
+        'users': users,
+        'courses': course_results,
         'skills': Skill.objects.filter(name__icontains=query),
         'articles': Article.objects.filter(title__icontains=query),
     }
@@ -652,6 +692,14 @@ def login_with_passkey(request):
             if Passkey.objects.filter(user=user, key=passkey).exists():
                 request.session['pending_user_id'] = user.id  # Store user ID temporarily
                 login(request, user)
+
+                # Save IP and browser info when logging in with passkey
+                user.last_login_ip = get_client_ip(request)
+                user.last_login_browser = request.META.get('HTTP_USER_AGENT', '')[:256]
+                print("Tracked login IP:", user.last_login_ip)
+                print("Tracked browser:", user.last_login_browser)
+                user.save(update_fields=['last_login_ip', 'last_login_browser'])
+
                 messages.success(request, "Passkey verified! Please complete CAPTCHA verification.")
                 request.session['is_otp_verified'] = True  # Mark OTP as verified
                 return redirect("/")
@@ -879,6 +927,27 @@ def post_otp_login_captcha(request):
 
     return render(request, 'accounts/post_otp_captcha.html', {'form': form})
 
+def get_client_ip(request):
+    # Using x_forwarded_for allows for proxy bypass to give the true IP of a user
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        return x_forwarded_for.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR')
+
+def login_with_tracking(request):
+    if request.method == 'POST':
+        username = request.POST.get('username')
+        password = request.POST.get('password')
+        user = authenticate(request, username=username, password=password)
+        if user:
+            login(request, user)
+
+            # Save IP and browser info when logging in with OTP
+            user.last_login_ip = get_client_ip(request)
+            user.last_login_browser = request.META.get('HTTP_USER_AGENT', '')[:256]
+            user.save(update_fields=['last_login_ip', 'last_login_browser'])
+            return redirect('home')
+    return render(request, 'accounts/sign-in.html')
 
 # Email Verification 
 # def verify_email(request, first_name):
@@ -1643,13 +1712,29 @@ def blog_list(request):
     posts_html = render_to_string('posts_partial.html', {'page_obj': page_obj})
     return JsonResponse({'posts_html': posts_html, 'has_next': page_obj.has_next()})
 
-
 def list_careers(request):
     jobs = Job.objects.filter(closing_date__gte=timezone.now()).order_by('closing_date')
+
+    search = request.GET.get('search', '')
+    job_type = request.GET.get('job_type', '')
+    location = request.GET.get('location', '')
+
+    if search:
+        jobs = jobs.filter(Q(title__icontains=search) | Q(description__icontains=search))
+    if job_type:
+        jobs = jobs.filter(job_type=job_type)
+    if location:
+        jobs = jobs.filter(location=location)
+
     context = {
-        "jobs":jobs
+        "jobs": jobs,
     }
-    return render(request,"careers/career-list.html",context)
+
+    if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+        return render(request, "careers/partials/job-listings.html", context)
+    else:
+        return render(request, "careers/career-list.html", context)
+
 
 def career_detail(request,id):
     job = get_object_or_404(Job, id=id)
@@ -1657,6 +1742,20 @@ def career_detail(request,id):
         "job":job
     }
     return render(request,"careers/career-detail.html",context)
+
+def career_discover(request):
+    return render(request, "careers/discover.html")
+
+def internships(request):
+    internships = Job.objects.filter(job_type='internship', closing_date__gte=timezone.now()).order_by('closing_date')
+    context = {
+        "internships": internships
+    }
+    return render(request, "careers/internships.html", context)
+
+# View for Job Alerts Page
+def job_alerts(request):
+    return render(request, "careers/job-alerts.html")
 
 def career_application(request,id):
     job = get_object_or_404(Job, id=id)
@@ -1749,6 +1848,12 @@ def leaderboard_update():
                 LeaderBoardTable.objects.create(first_name=user.first_name, last_name=user.last_name, category=category, total_points=total_points)
 
 
+def cyber_quiz(request):
+    """
+    View for the cybersecurity quiz page.
+    """
+    return render(request, 'pages/challenges/quiz.html')
+
 def comphrehensive_reports(request):
     reports = AppAttackReport.objects.all().order_by('-year')
     return render(request, 'pages/appattack/comprehensive_reports.html', {'reports': reports})
@@ -1798,6 +1903,16 @@ def secure_code_review_form_view(request):
     else:
         form = SecureCodeReviewRequestForm()
     return render(request, 'pages/appattack/secure_code_review_form.html', {'form': form, 'title': "Secure Code Review Request"})
+
+@login_required
+def delete_account(request):
+    if request.method == 'POST':
+        user = request.user
+        user.delete()
+        logout(request)
+        messages.success(request, "Your account has been deleted.")
+        return redirect('login') 
+    return HttpResponseNotAllowed(['POST'])
 
 def tools_home(request):
     return render(request, 'pages/pt_gui/tools/index.html')
